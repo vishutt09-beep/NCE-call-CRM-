@@ -2649,18 +2649,18 @@ body #app > #cleanMoreNav.nceMenuDrawer:not(.hidden){display:flex!important;flex
  <section class="nceMsgQFilter">
   <label class="adminOnly hidden">Calling Madam<select id="nceMsgQStaff"><option value="">All Staff</option></select></label>
   <label>Message Work<select id="nceMsgQMode"><option value="whatsapp">WhatsApp Pending</option><option value="sms">SMS Pending</option></select></label>
-  <label>View<select id="nceMsgQStatus"><option value="pending">Only Verified Pending</option><option value="all">All Checked / Unchecked</option><option value="sent">Sent Confirmed</option></select></label>
+  <label>View<select id="nceMsgQStatus"><option value="pending">Only Pending</option><option value="all">All Numbers</option><option value="sent">Sent Confirmed</option></select></label>
   <label>Customer Name / Mobile<input id="nceMsgQSearch" type="search" placeholder="Search loaded contacts" autocomplete="off"/></label>
  </section>
- <div class="nceMsgQSummary" id="nceMsgQSummary" role="status">Select message work to check the next batch.</div>
+ <div class="nceMsgQSummary" id="nceMsgQSummary" role="status">Loading saved message history…</div>
  <div class="nceMsgQActions">
-  <button id="nceMsgQVerify" class="btn" type="button">Check Current 12 Numbers</button>
-  <button id="nceMsgQNext" class="secondaryBtn" type="button">Next 12 Numbers →</button>
-  <button id="nceMsgQReset" class="secondaryBtn" type="button">Start From First</button>
+  <button id="nceMsgQVerify" class="btn" type="button">Refresh Pending History</button>
+  <button id="nceMsgQNext" class="secondaryBtn" type="button">Next 50 Numbers →</button>
+  <button id="nceMsgQReset" class="secondaryBtn" type="button">First Page</button>
   <button id="nceMsgQLoadContacts" class="secondaryBtn" type="button">Load More Contacts</button>
  </div>
  <div class="nceMsgQRows" id="nceMsgQRows"></div>
- <p class="nceMsgQDisclaimer"><strong>Important:</strong> "Pending" is only shown after checking this contact's saved message confirmations, including older pages. A failed query shows <b>Unable to verify</b>, not "Pending". On reopening the app, saved messageLogs are checked again. These are staff-confirmed sends, not verified WhatsApp/SMS delivery. Totals are for checked/loaded contacts only. Admin sees all assigned contacts; Staff can read only their own message logs. After staff transfer, older confirmations by another staff may need Admin review. Checking many records uses Firebase reads.</p>
+ <p class="nceMsgQDisclaimer"><strong>Important:</strong> Message confirmations are checked across the readable saved history before showing Pending. Cards are shown 50 per page, but all matching loaded contacts are included in the count. If additional contacts remain unloaded, use Load More Contacts. Staff can read their own messages; after a number transfers between staff, earlier confirmations by another staff might need Admin review. All confirmations are staff-reported, not verified delivery. Scanning large histories consumes Firestore reads.</p>
 </div>
 <div class="tab hidden space-y-4" id="sentactivity">
   <header class="nceSentReportHero">
@@ -5622,11 +5622,12 @@ $('nceUXVerifyTable').addEventListener('click',e=>{const b=e.target.closest('[da
 window.addEventListener('nce-crm-identity',()=>{nceUXFinderPage=0;nceUXPendingPage=0;nceUXGapPage=0;nceUXReportCache=[];$('nceUXFindSearch').value='';$('nceUXPendingSearch').value='';});
 
 
-// Three independent work folders: message confirmations never close a phone-call task.
-// Source of truth: immutable messageLogs; no new Firebase collections or rules.
-const NCE_MSGQ_BATCH=12, NCE_MSGQ_CHECK_PAGE=30;
+// Independent Call and Message Pending folders. Read message confirmations once per session,
+// not one Firestore query per contact and not just 12 contacts at a time.
+const NCE_MSGQ_BATCH=50, NCE_MSGQ_LOG_PAGE=300;
 let nceMsgQCache=new Map(),nceMsgQOffset=0,nceMsgQBusy=false,nceMsgQToken=0;
-function nceMsgQResetSession(){nceMsgQToken++;nceMsgQCache.clear();nceMsgQOffset=0;nceMsgQBusy=false;}
+let nceMsgQReady=false,nceMsgQError='',nceMsgQScanned=0;
+function nceMsgQResetSession(){nceMsgQToken++;nceMsgQCache.clear();nceMsgQOffset=0;nceMsgQBusy=false;nceMsgQReady=false;nceMsgQError='';nceMsgQScanned=0;}
 function nceMsgQList(){
  if(!user)return [];
  const sf=role==='admin'?$('nceMsgQStaff').value:user.uid;
@@ -5636,10 +5637,9 @@ function nceMsgQList(){
   .sort((a,b)=>String(a.id).localeCompare(String(b.id)));
 }
 function nceMsgQMarkSent(contactId,mode){
- const current=nceMsgQCache.get(String(contactId));
- if(current){current[mode]=true;current.error='';current.verified=true;}
- else nceMsgQCache.set(String(contactId),{verified:false,whatsapp:mode==='whatsapp',sms:mode==='sms',error:''});
- // A successful message save is NOT a completed call.
+ const key=String(contactId),old=nceMsgQCache.get(key)||{whatsapp:false,sms:false};
+ nceMsgQCache.set(key,{...old,[mode]:true});
+ // Keep cached status on successful save. Never changes Call Pending.
 }
 function nceMsgQSyncStaff(){
  const s=$('nceMsgQStaff');if(!s)return;
@@ -5651,76 +5651,80 @@ function nceMsgQRender(){
  if(!user)return;
  nceMsgQSyncStaff();
  const mode=$('nceMsgQMode').value,filter=$('nceMsgQStatus').value,all=nceMsgQList();
- nceMsgQOffset=Math.min(nceMsgQOffset,Math.max(0,Math.floor((all.length-1)/NCE_MSGQ_BATCH)*NCE_MSGQ_BATCH));
- const page=all.slice(nceMsgQOffset,nceMsgQOffset+NCE_MSGQ_BATCH);
- const checked=page.filter(c=>nceMsgQCache.get(c.id)?.verified);
- const pending=checked.filter(c=>nceMsgQCache.get(c.id)[mode]===false),sent=checked.filter(c=>nceMsgQCache.get(c.id)[mode]===true);
- const failed=page.filter(c=>nceMsgQCache.get(c.id)?.error);
- $('nceMsgQSummary').textContent=`Loaded contacts matching: ${all.length}${moreContactsAvailable?' (more contacts in Firebase)':''} · Showing ${page.length?nceMsgQOffset+1:0}–${nceMsgQOffset+page.length} · Checked: ${checked.length} · Verified ${mode==='whatsapp'?'WhatsApp':'SMS'} pending: ${pending.length} · Sent: ${sent.length}${failed.length?' · Unable to verify: '+failed.length:''}. Counts apply only to checked numbers on this page.`;
- $('nceMsgQNext').disabled=nceMsgQBusy||nceMsgQOffset+NCE_MSGQ_BATCH>=all.length;
+ const known=nceMsgQReady&&!nceMsgQError;
+ const filtered=known?all.filter(c=>{
+  const sent=!!nceMsgQCache.get(String(c.id))?.[mode];
+  return filter==='pending'?!sent:filter==='sent'?sent:true;
+ }):[];
+ nceMsgQOffset=Math.min(nceMsgQOffset,Math.max(0,Math.floor((filtered.length-1)/NCE_MSGQ_BATCH)*NCE_MSGQ_BATCH));
+ const page=filtered.slice(nceMsgQOffset,nceMsgQOffset+NCE_MSGQ_BATCH);
+ const label=mode==='whatsapp'?'WhatsApp':'SMS';
+ const pending=known?all.filter(c=>!nceMsgQCache.get(String(c.id))?.[mode]).length:null;
+ const sent=known?all.length-pending:null;
+ $('nceMsgQSummary').textContent=nceMsgQError
+  ?`Message History verification failed: ${nceMsgQError}. Pending status is not shown until verification succeeds.`
+  :!known?`Checking saved ${label}/SMS confirmations… ${nceMsgQScanned} message records checked. Pending numbers will appear after the history check finishes.`
+  :`${label} Pending: ${pending} · Sent confirmed: ${sent} · Matching contacts: ${all.length}${moreContactsAvailable?' (loaded contacts only; more contacts available)':''} · Showing ${page.length?nceMsgQOffset+1:0}–${nceMsgQOffset+page.length}. All matching loaded contacts are checked; cards are paginated.`;
+ $('nceMsgQNext').disabled=!known||nceMsgQOffset+NCE_MSGQ_BATCH>=filtered.length;
+ $('nceMsgQReset').disabled=!known||nceMsgQOffset===0;
  $('nceMsgQVerify').disabled=nceMsgQBusy;
- $('nceMsgQVerify').textContent=nceMsgQBusy?'Checking saved messages…':'Check Current 12 Numbers';
+ $('nceMsgQVerify').textContent=nceMsgQBusy?'Checking history…':'Refresh Pending History';
+ $('nceMsgQNext').textContent='Next 50 Numbers →';
+ $('nceMsgQReset').textContent='First Page';
  $('nceMsgQLoadContacts').classList.toggle('hidden',!moreContactsAvailable);
- const visible=page.filter(c=>{
-  const x=nceMsgQCache.get(c.id);
-  if(filter==='all')return true;
-  if(!x?.verified)return filter==='pending'; // show checking / error rather than falsely claiming pending
-  return filter==='pending'?!x[mode]:!!x[mode];
- });
- $('nceMsgQRows').innerHTML=visible.length?visible.map(c=>{
-  const v=nceMsgQCache.get(c.id);
-  const text=v?.error?'Unable to verify':!v?.verified?'Checking history…':v[mode]?'Sent Confirmed':'Pending · No sent confirmation found';
-  const color=v?.error?'error':!v?.verified?'':v[mode]?'sent':'pending';
-  const alt=mode==='whatsapp'?'WhatsApp':'SMS';
-  return `<article class="nceMsgQCard" data-msgq-card="${esc(c.id)}"><div class="nceMsgQTitle"><strong>${esc(c.name||'Customer')}</strong><span class="nceMsgQChip ${color}">${esc(text)}</span></div><div class="nceMsgQMeta">${esc(c.mobile||'—')} · ${esc(c.assignedName||'Staff')} · Call: ${esc(c.status||'Pending')}</div>${String(c.lastNote||'').trim()?`<div class="nceMsgQNotes"><b>Latest Call Note</b> · ${esc(c.lastNote)}</div>`:''}${v?.error?`<p class="nceMsgQMeta">${esc(v.error)}. Create the needed Firestore index or check quota, then Refresh.</p>`:''}<div class="nceMsgQCardActions"><a class="phoneLink" href="tel:${esc(phone(c.mobile||''))}">Call</a><button class="secondaryBtn" type="button" data-msgq-action="message" data-mode="${mode}" data-id="${esc(c.id)}">${esc(alt)} ${v?.verified&&v[mode]?'Again':'Send'}</button><button class="secondaryBtn" type="button" data-msgq-action="profile" data-id="${esc(c.id)}">History</button></div></article>`;
- }).join(''):'<div class="nceMsgQSummary">No matching records in the current 12-number page. Use Next 12 Numbers or change View.</div>';
+ $('nceMsgQRows').innerHTML=!known
+  ?`<div class="nceMsgQSummary">${esc(nceMsgQError||'Checking message history. No unverified contact is labelled Pending.')}</div>`
+  :page.length?page.map(c=>{
+   const v=nceMsgQCache.get(String(c.id))||{};
+   const isSent=!!v[mode],chip=isSent?'Sent Confirmed':'Pending · No saved sent confirmation';
+   return `<article class="nceMsgQCard" data-msgq-card="${esc(c.id)}"><div class="nceMsgQTitle"><strong>${esc(c.name||'Customer')}</strong><span class="nceMsgQChip ${isSent?'sent':'pending'}">${esc(chip)}</span></div><div class="nceMsgQMeta">${esc(c.mobile||'—')} · ${esc(c.assignedName||'Staff')} · Call: ${esc(c.status||'Pending')}</div>${String(c.lastNote||'').trim()?`<div class="nceMsgQNotes"><b>Latest Call Note</b> · ${esc(c.lastNote)}</div>`:''}<div class="nceMsgQCardActions"><a class="phoneLink" href="tel:${esc(phone(c.mobile||''))}">Call</a><button class="secondaryBtn" type="button" data-msgq-action="message" data-mode="${mode}" data-id="${esc(c.id)}">${esc(label)} ${isSent?'Again':'Send'}</button><button class="secondaryBtn" type="button" data-msgq-action="profile" data-id="${esc(c.id)}">History</button></div></article>`;
+  }).join(''):'<div class="nceMsgQSummary">No numbers match these filters.</div>';
 }
-async function nceMsgQVerifyOne(c,token,uid,session){
- const key=String(c.id);
- if(nceMsgQCache.get(key)?.verified)return;
- let cursor=null,hasMore=true,wa=false,sms=false,pages=0;
+async function nceMsgQCheck(force=false){
+ if(!user||nceMsgQBusy)return;
+ if(nceMsgQReady&&!force){nceMsgQRender();return;}
+ const uid=user.uid,session=messageSession,token=++nceMsgQToken;
+ nceMsgQBusy=true;nceMsgQReady=false;nceMsgQError='';nceMsgQScanned=0;
+ const pendingMap=new Map();nceMsgQRender();
  try{
-  // Read ALL old confirmations for a contact, not just newest 100/400 global logs.
-  while(hasMore){
-   const snap=await getDocs(nceProfileMessageQuery(c.id,cursor));
+  let cursor=null,more=true;
+  while(more){
+   // Staff query is restricted by security rules; Admin reads all saved confirmations.
+   const base=role==='admin'
+    ?query(collection(db,'messageLogs'),orderBy('createdAt','desc'))
+    :query(collection(db,'messageLogs'),where('staffUid','==',uid),orderBy('createdAt','desc'));
+   const q=cursor?query(base,startAfter(cursor),limit(NCE_MSGQ_LOG_PAGE)):query(base,limit(NCE_MSGQ_LOG_PAGE));
+   const snap=await getDocs(q);
    if(token!==nceMsgQToken||!user||user.uid!==uid||messageSession!==session)return;
-   for(const d of snap.docs){const m=d.data();if(m.contactId!==c.id)continue;
-    if(role==='staff'&&m.staffUid!==uid)continue;
-    if(m.confirmedByUser!==true)continue;
-    if(m.mode==='whatsapp')wa=true;if(m.mode==='sms')sms=true;
+   for(const d of snap.docs){
+    const m=d.data();if(m.confirmedByUser!==true||!m.contactId)continue;
+    const k=String(m.contactId),entry=pendingMap.get(k)||{whatsapp:false,sms:false};
+    if(m.mode==='whatsapp')entry.whatsapp=true;
+    if(m.mode==='sms')entry.sms=true;
+    pendingMap.set(k,entry);
    }
-   hasMore=snap.size===NCE_PROFILE_MESSAGE_BATCH&&!!snap.docs.length;
-   cursor=snap.docs.at(-1)||cursor;
-   if(wa&&sms)break;
-   pages++;
-   // Guard against extraordinary histories; unverified is not falsely called Pending.
-   if(pages>=60&&hasMore)throw Error('Very long history: review this number in Customer Profile');
+   nceMsgQScanned+=snap.size;
+   more=snap.size===NCE_MSGQ_LOG_PAGE;
+   cursor=snap.docs[snap.docs.length-1]||null;
+   if(more)nceMsgQRender();
   }
-  if(token===nceMsgQToken){const old=nceMsgQCache.get(key);nceMsgQCache.set(key,{verified:true,whatsapp:wa||!!old?.whatsapp,sms:sms||!!old?.sms,error:''});}
- }catch(e){if(token===nceMsgQToken)nceMsgQCache.set(key,{verified:false,whatsapp:false,sms:false,error:e.code==='failed-precondition'?'Composite Firestore index required (messageLogs: contactId + staffUid)':'Message check failed: '+(e.code||e.message||'Unknown')});}
+  nceMsgQCache=pendingMap;nceMsgQReady=true;
+ }catch(e){if(token===nceMsgQToken){nceMsgQError=e.code==='failed-precondition'?'Firestore index missing (messageLogs: staffUid ASC + createdAt DESC)':(e.code||e.message||'Unknown error');}}
+ finally{if(token===nceMsgQToken){nceMsgQBusy=false;nceMsgQRender();}}
 }
-async function nceMsgQCheck(){
- if(nceMsgQBusy||!user)return;
- const ids=nceMsgQList().slice(nceMsgQOffset,nceMsgQOffset+NCE_MSGQ_BATCH),uid=user.uid,session=messageSession,token=++nceMsgQToken;
- nceMsgQBusy=true;nceMsgQRender();
- // Only two queries in flight at a time to avoid a burst of Spark reads.
- let offset=0;
- async function worker(){while(offset<ids.length){const c=ids[offset++];await nceMsgQVerifyOne(c,token,uid,session);if(token!==nceMsgQToken)return;nceMsgQRender();}}
- try{await Promise.all([worker(),worker()]);}finally{if(token===nceMsgQToken){nceMsgQBusy=false;nceMsgQRender();}}
-}
-function nceMsgQOpen(){nceMsgQRender();void nceMsgQCheck()}
-$('nceMsgQVerify').onclick=()=>{nceMsgQCache.clear();void nceMsgQCheck()};
-$('nceMsgQNext').onclick=()=>{if(nceMsgQBusy)return;nceMsgQOffset+=NCE_MSGQ_BATCH;nceMsgQOpen()};
-$('nceMsgQReset').onclick=()=>{if(nceMsgQBusy)return;nceMsgQOffset=0;nceMsgQOpen()};
-$('nceMsgQLoadContacts').onclick=async()=>{await loadNextContacts();nceMsgQOpen()};
+function nceMsgQOpen(){nceMsgQRender();if(!nceMsgQReady&&!nceMsgQBusy)void nceMsgQCheck()}
+$('nceMsgQVerify').onclick=()=>{nceMsgQOffset=0;void nceMsgQCheck(true)};
+$('nceMsgQNext').onclick=()=>{nceMsgQOffset+=NCE_MSGQ_BATCH;nceMsgQRender()};
+$('nceMsgQReset').onclick=()=>{nceMsgQOffset=0;nceMsgQRender()};
+$('nceMsgQLoadContacts').onclick=async()=>{await loadNextContacts();nceMsgQOffset=0;nceMsgQOpen()};
 for(const id of ['nceMsgQSearch','nceMsgQStaff','nceMsgQMode','nceMsgQStatus']){
- $(id).addEventListener(id==='nceMsgQSearch'?'input':'change',()=>{if(nceMsgQBusy)return;nceMsgQOffset=0;nceMsgQOpen()});
+ $(id).addEventListener(id==='nceMsgQSearch'?'input':'change',()=>{nceMsgQOffset=0;nceMsgQRender()});
 }
 $('nceMsgQRows').onclick=e=>{const b=e.target.closest('[data-msgq-action]');if(!b||!user)return;const c=contacts.find(x=>x.id===b.dataset.id);if(!c)return;
  if(b.dataset.msgqAction==='profile'){openCustomerHistory(c.id);return;}
- const m=b.dataset.mode,v=nceMsgQCache.get(c.id);
- if(v?.verified&&v[m]&&!confirm('આ Customer માટે '+(m==='whatsapp'?'WhatsApp':'SMS')+' Sent Confirmed છે. ફરી Message મોકલવો છે?'))return;
- if(!v?.verified)return msg('Message History ચેક કર્યા વગર ફરી WhatsApp/SMS મોકલશો નહીં. Check Current 12 Numbers દબાવો.');
+ const m=b.dataset.mode,v=nceMsgQCache.get(String(c.id));
+ if(!nceMsgQReady)return msg('Message History verification પૂરી થયા પછી Message મોકલો.');
+ if(v?.[m]&&!confirm('આ Customer માટે '+(m==='whatsapp'?'WhatsApp':'SMS')+' Sent Confirmed છે. ફરી Message મોકલવો છે?'))return;
  startMessage(c,m,c.assignedUid);
 };
 </script><dialog class="rounded-2xl p-5 w-[min(94vw,540px)] shadow-2xl" id="followDialog">
